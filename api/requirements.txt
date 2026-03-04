@@ -6,7 +6,9 @@ pydantic
 python-dotenv
 toml
 werkzeug
-flasgger
+# flasgger - commented out for Vercel deployment (requires building from source)
+# Install locally with: pip install flasgger
+# flasgger
 openai
 langchain
 langchain-community
