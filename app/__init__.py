@@ -20,32 +20,8 @@ def create_app(config_class=Config):
     
     # Initialize extensions
     db.init_app(app)
-    # Enable CORS - allow all origins in production (Vercel), localhost in development
-    import os
-    is_production = os.getenv('VERCEL') or os.getenv('FLASK_ENV') == 'production'
-    
-    if is_production:
-        # In production, allow all origins (or specify allowed origins via env var)
-        allowed_origins = os.getenv('CORS_ORIGINS', '*')
-        if allowed_origins == '*':
-            CORS(app, resources={r"/*": {"origins": "*"}})
-        else:
-            # Allow multiple origins separated by comma
-            origins_list = [origin.strip() for origin in allowed_origins.split(',')]
-            CORS(app, resources={r"/*": {"origins": origins_list}})
-    else:
-        # Enable CORS for localhost origins (common development ports)
-        localhost_origins = [
-            "http://localhost",
-            "http://localhost:3000",
-            "http://localhost:5001",
-            "http://localhost:8080",
-            "http://127.0.0.1",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5001",
-            "http://127.0.0.1:8080",
-        ]
-        CORS(app, resources={r"/*": {"origins": localhost_origins}})
+    # Enable CORS - allow all origins regardless of environment
+    CORS(app, resources={r"/*": {"origins": "*"}})
     
     # Register blueprints first (needed for Swagger to discover routes)
     from app.api import auth as auth_bp, hr as hr_bp, autosphere as autosphere_bp
