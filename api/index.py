@@ -16,28 +16,14 @@ sys.path.insert(0, os.path.abspath(parent_dir))
 # Consider using a managed database like PostgreSQL, MySQL, or MongoDB
 os.environ.setdefault('DATABASE_URL', 'sqlite:////tmp/hr_demo.db')
 
-# Import Flask app
-try:
-    from app import create_app
-    
-    # Create Flask app instance (module-level for reuse across invocations)
-    # Vercel expects this to be named 'app' for automatic Flask detection
-    app = create_app()
-    flask_app = app  # Keep alias for backward compatibility
-except Exception as e:
-    # If import fails, create a minimal error app
-    from flask import Flask
-    app = Flask(__name__)
-    
-    @app.route('/<path:path>')
-    def error_handler(path):
-        return {
-            'error': f'Failed to import Flask app: {str(e)}',
-            'path': path
-        }, 500
-    
-    flask_app = app
-    print(f"Warning: Failed to import main app: {e}")
+# Import Flask - required dependency
+from flask import Flask
+
+# Import and create Flask app
+# Vercel expects this to be named 'app' for automatic Flask detection
+from app import create_app
+app = create_app()
+flask_app = app  # Keep alias for backward compatibility
 
 def handler(request):
     """
