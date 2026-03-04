@@ -26,6 +26,7 @@ from flask import Flask
 try:
     from app import create_app
     app = create_app()
+    print("Flask app created successfully")
 except Exception as e:
     # If app creation fails, create a minimal error app
     print(f"ERROR: Failed to create Flask app: {e}")
@@ -44,3 +45,8 @@ except Exception as e:
             'note': 'Check Vercel logs for full traceback'
         }
         return error_info, 500
+
+# Ensure app is always a Flask instance (never None)
+# This is critical for Vercel's Flask detection
+assert app is not None, "Flask app must be initialized"
+assert isinstance(app, Flask), "app must be a Flask instance"
