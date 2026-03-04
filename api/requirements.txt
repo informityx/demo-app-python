@@ -1,3 +1,19 @@
-# This file is intentionally empty
-# The serverless function doesn't require any external dependencies
-# All imports are from Python standard library only
+flask
+flask-sqlalchemy
+flask-cors
+pyjwt
+pydantic
+python-dotenv
+toml
+werkzeug
+flasgger
+openai
+langchain
+langchain-community
+langchain-openai
+faiss-cpu
+pandas
+openpyxl
+PyPDF2
+python-docx
+scikit-learn
