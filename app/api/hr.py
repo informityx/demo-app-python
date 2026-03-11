@@ -112,7 +112,8 @@ def evaluate_cvs():
         # Format response
         response_data = CVEvaluationResponse(
             results=result['results'],
-            executive_kpis=result['executive_kpis']
+            executive_kpis=result['executive_kpis'],
+            processing_time_seconds=result.get('processing_time_seconds'),
         )
         
         return success_response(data=response_data.dict(), message="CV evaluation completed")

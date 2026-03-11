@@ -52,6 +52,7 @@ class CVEvaluationResponse(BaseModel):
     """CV evaluation response schema"""
     results: List[CVResult] = Field(..., description="Ranked list of CV evaluation results")
     executive_kpis: Dict[str, Any] = Field(..., description="Executive KPIs (total candidates, average match, etc.)")
+    processing_time_seconds: Optional[float] = Field(None, description="Total processing time in seconds (for reference)")
     
     class Config:
         json_schema_extra = {

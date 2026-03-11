@@ -23,3 +23,10 @@ openpyxl
 PyPDF2
 python-docx
 scikit-learn
+# CV evaluation embeddings: align versions to avoid NumPy/PyTorch/transformers conflicts
+# (numpy<2 avoids binary incompatibility; torch 2.2+ works with sentence-transformers on PyPI)
+numpy>=1.24,<2
+torch>=2.2
+transformers>=4.45
+accelerate>=0.33
+sentence-transformers>=2.7,<3.3
