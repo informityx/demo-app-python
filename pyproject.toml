@@ -2,7 +2,7 @@
 name = "hr-demo-python"
 version = "1.0.0"
 description = "HR Demo Flask Application"
-requires-python = ">=3.8"
+requires-python = ">=3.8.1,<4.0"
 dependencies = [
     "flask",
     "flask-sqlalchemy",
@@ -26,6 +26,11 @@ dependencies = [
     "PyPDF2",
     "python-docx",
     "scikit-learn",
+    "numpy>=1.24,<2",
+    "torch>=2.2",
+    "transformers>=4.45",
+    "accelerate>=0.33",
+    "sentence-transformers>=2.7,<3.3",
 ]
 
 [project.scripts]
