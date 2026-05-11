@@ -1,7 +1,10 @@
 from functools import lru_cache
+import logging
 from typing import List
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -24,6 +27,10 @@ def _get_model() -> "SentenceTransformer":
             "sentence-transformers is required for embeddings. "
             "Install it with: pip install sentence-transformers"
         )
+    logger.info(
+        "Loading local embedding model %s (first use may download ~90MB)...",
+        EMBEDDING_MODEL_NAME,
+    )
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
 
@@ -38,6 +45,21 @@ def get_embeddings(texts: List[str]) -> np.ndarray:
     """Return embeddings for a list of texts as a 2D numpy array."""
     model = _get_model()
     return model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
+
+
+def get_embeddings_chunked(
+    texts: List[str], chunk_size: int = 32
+) -> np.ndarray:
+    """
+    Return embeddings for a list of texts in chunks to avoid OOM for large N.
+    Result shape is (len(texts), embedding_dim).
+    """
+    if not texts:
+        empty = get_embedding("")
+        return np.zeros((0, empty.shape[0]), dtype=np.float32)
+    chunks = [texts[i : i + chunk_size] for i in range(0, len(texts), chunk_size)]
+    parts = [get_embeddings(chunk) for chunk in chunks]
+    return np.vstack(parts)
 
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:

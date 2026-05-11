@@ -1,14 +1,21 @@
 import json
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple
 
 from app.utils.openai_client import get_openai_client
 
 logger = logging.getLogger(__name__)
+
+# Cap text length before local embedding (sentence-transformers); avoids multi‑minute CPU stalls on huge PDFs.
+_EMBED_TEXT_MAX_CHARS = int(os.getenv("CV_EMBED_MAX_CHARS", "60000"))
+
 from app.repositories.policy_document_repository import PolicyDocumentRepository
-from app.utils.file_processor import process_file, process_multiple_files
-from app.utils.embeddings import get_embedding, cosine_sim
+from app.utils.file_processor import process_file, process_multiple_files, process_multiple_files_parallel
+import numpy as np
+from app.utils.embeddings import get_embedding, get_embeddings, get_embeddings_chunked, cosine_sim
 from werkzeug.datastructures import FileStorage
 
 
@@ -34,9 +41,11 @@ class HRService:
             return 0.0
         emb1 = get_embedding(text1)
         emb2 = get_embedding(text2)
-        score = cosine_sim(emb1, emb2)
-        # cosine_sim is in [-1, 1], but due to normalization and semantic model
-        # we generally see [0, 1]. Clamp to [0, 1] for safety, then scale.
+        return self._similarity_from_embeddings(emb1, emb2)
+
+    def _similarity_from_embeddings(self, cv_emb: np.ndarray, jd_emb: np.ndarray) -> float:
+        """Compute similarity score (0-100) from precomputed CV and JD embeddings."""
+        score = cosine_sim(cv_emb, jd_emb)
         score = max(0.0, min(1.0, score))
         return round(score * 100, 2)
     
@@ -82,65 +91,72 @@ class HRService:
         """Get skill scores (0-100) for a candidate based on CV and JD using embeddings."""
         if not skills:
             return {}
-
-        # Build one embedding for the full CV and JD to compare against.
         cv_emb = get_embedding(cv_text or "")
         jd_emb = get_embedding(jd_text or "")
+        skill_phrases = [
+            f"Evidence of {s} in candidate experience. Requirement for {s} in job description."
+            if s else "Unknown skill"
+            for s in skills
+        ]
+        skill_embeddings = get_embeddings(skill_phrases) if skill_phrases else np.zeros((0, cv_emb.shape[0]))
+        return self._skill_scores_from_embeddings(cv_emb, jd_emb, skill_embeddings, skills)
 
+    def _skill_scores_from_embeddings(
+        self,
+        cv_emb: np.ndarray,
+        jd_emb: np.ndarray,
+        skill_embeddings: np.ndarray,
+        skills: List[str],
+    ) -> Dict[str, float]:
+        """Compute skill scores (0-100) from precomputed embeddings. skill_embeddings shape (len(skills), dim)."""
         scores: Dict[str, float] = {}
-        for skill in skills:
-            if not skill:
+        for i, skill in enumerate(skills):
+            if not skill or i >= skill_embeddings.shape[0]:
                 continue
-
-            # Simple phrasing to give the model some context for the skill.
-            skill_phrase_cv = f"Evidence of {skill} in candidate experience."
-            skill_phrase_jd = f"Requirement for {skill} in job description."
-
-            # Average similarity between skill and CV/JD context.
-            skill_emb = get_embedding(skill_phrase_cv + " " + skill_phrase_jd)
+            skill_emb = skill_embeddings[i]
             sim_cv = cosine_sim(skill_emb, cv_emb)
             sim_jd = cosine_sim(skill_emb, jd_emb)
-
-            # Clamp to [0, 1], then scale to [0, 100].
             sim_avg = max(0.0, min(1.0, (sim_cv + sim_jd) / 2.0))
             scores[skill] = round(sim_avg * 100, 1)
-
         return scores
-    
+
     def extract_skill_status(self, cv_text: str, jd_text: str, skills: List[str]) -> Dict[str, List[str]]:
-        """
-        Derive missing, absent, and strong skills from embedding-based similarity.
-
-        We reuse the same embedding strategy as in get_skill_scores and apply
-        simple thresholds on the resulting scores.
-        """
-        status = {"missing": [], "absent": [], "strong": []}
+        """Derive missing, absent, and strong skills from embedding-based similarity."""
         if not skills:
-            return status
-
+            return {"missing": [], "absent": [], "strong": []}
         cv_emb = get_embedding(cv_text or "")
         jd_emb = get_embedding(jd_text or "")
+        skill_phrases = [
+            f"Evidence of {s} in candidate experience. Requirement for {s} in job description."
+            if s else "Unknown skill"
+            for s in skills
+        ]
+        skill_embeddings = get_embeddings(skill_phrases) if skill_phrases else np.zeros((0, cv_emb.shape[0]))
+        return self._skill_status_from_embeddings(cv_emb, jd_emb, skill_embeddings, skills)
 
-        for skill in skills:
-            if not skill:
+    def _skill_status_from_embeddings(
+        self,
+        cv_emb: np.ndarray,
+        jd_emb: np.ndarray,
+        skill_embeddings: np.ndarray,
+        skills: List[str],
+    ) -> Dict[str, List[str]]:
+        """Derive missing/absent/strong from precomputed embeddings. Same thresholds as before."""
+        status = {"missing": [], "absent": [], "strong": []}
+        for i, skill in enumerate(skills):
+            if not skill or i >= skill_embeddings.shape[0]:
                 continue
-
-            skill_phrase_cv = f"Evidence of {skill} in candidate experience."
-            skill_phrase_jd = f"Requirement for {skill} in job description."
-            skill_emb = get_embedding(skill_phrase_cv + " " + skill_phrase_jd)
-
+            skill_emb = skill_embeddings[i]
             sim_cv = cosine_sim(skill_emb, cv_emb)
             sim_jd = cosine_sim(skill_emb, jd_emb)
             sim_avg = max(0.0, min(1.0, (sim_cv + sim_jd) / 2.0))
             score = sim_avg * 100.0
-
             if score >= 70.0:
                 status["strong"].append(skill)
             elif score >= 30.0:
                 status["missing"].append(skill)
             else:
                 status["absent"].append(skill)
-
         return status
     
     def get_hire_recommendation(self, score: float, missing_skills: List[str], 
@@ -196,26 +212,71 @@ class HRService:
             "risk_level": risk_level
         }
     
+    def _clip_for_embedding(self, text: str) -> str:
+        if not text:
+            return ""
+        if len(text) <= _EMBED_TEXT_MAX_CHARS:
+            return text
+        logger.info(
+            "Clipping text for embedding from %d to %d chars",
+            len(text),
+            _EMBED_TEXT_MAX_CHARS,
+        )
+        return text[:_EMBED_TEXT_MAX_CHARS]
+
     def evaluate_cvs(self, cv_files: List[FileStorage], jd_text: str) -> Dict:
         """Evaluate multiple CVs against job description"""
         start = time.perf_counter()
 
         # Extract skills from JD once
+        t0 = time.perf_counter()
         skills = self.extract_skills_from_jd(jd_text)
-        
-        # Process all CV files
-        cv_results = process_multiple_files(cv_files)
-        
-        # First compute local metrics (no LLM calls) so we can rank candidates.
+        logger.info("CV eval: JD skill extraction took %.2fs (%d skills)", time.perf_counter() - t0, len(skills))
+
+        # Process all CV files (parallel for scale)
+        t0 = time.perf_counter()
+        cv_results = process_multiple_files_parallel(cv_files)
+        logger.info(
+            "CV eval: file extraction took %.2fs (%d files)",
+            time.perf_counter() - t0,
+            len(cv_files),
+        )
+        valid_cv_results = [
+            (filename, cv_text)
+            for filename, cv_text in cv_results
+            if not cv_text.startswith("Error")
+        ]
+
+        # Precompute embeddings once for scale (100+ CVs).
+        t0 = time.perf_counter()
+        jd_for_emb = self._clip_for_embedding(jd_text or "")
+        jd_embedding = get_embedding(jd_for_emb)
+        skill_phrases = [
+            f"Evidence of {s} in candidate experience. Requirement for {s} in job description."
+            if s else "Unknown skill"
+            for s in skills
+        ]
+        skill_embeddings = (
+            get_embeddings(skill_phrases)
+            if skill_phrases
+            else np.zeros((0, jd_embedding.shape[0]), dtype=np.float32)
+        )
+        cv_texts = [self._clip_for_embedding(t) for _, t in valid_cv_results]
+        cv_embeddings = get_embeddings_chunked(cv_texts) if cv_texts else np.zeros((0, jd_embedding.shape[0]), dtype=np.float32)
+        logger.info(
+            "CV eval: embeddings took %.2fs (%d CVs)",
+            time.perf_counter() - t0,
+            len(cv_texts),
+        )
+
+        # Compute local metrics from embeddings (no per-CV embedding calls).
         intermediate_results = []
-        for filename, cv_text in cv_results:
-            if cv_text.startswith("Error"):
-                continue  # Skip files that failed to process
-            
-            sim_score = self.similarity_score(cv_text, jd_text)
-            skill_scores = self.get_skill_scores(cv_text, jd_text, skills)
-            skill_status = self.extract_skill_status(cv_text, jd_text, skills)
-            
+        for i in range(len(valid_cv_results)):
+            filename, cv_text = valid_cv_results[i]
+            cv_emb = cv_embeddings[i]
+            sim_score = self._similarity_from_embeddings(cv_emb, jd_embedding)
+            skill_scores = self._skill_scores_from_embeddings(cv_emb, jd_embedding, skill_embeddings, skills)
+            skill_status = self._skill_status_from_embeddings(cv_emb, jd_embedding, skill_embeddings, skills)
             intermediate_results.append({
                 "name": filename,
                 "cv_text": cv_text,
@@ -230,12 +291,49 @@ class HRService:
 
         # Decide how many candidates get a full LLM evaluation text.
         MAX_DETAILED_EVAL = 5
+        MAX_LLM_WORKERS = 4  # Parallel LLM calls when not using batched eval
 
-        results = []
-        for idx, item in enumerate(intermediate_results):
-            cv_text = item["cv_text"]
+        top_n = intermediate_results[:MAX_DETAILED_EVAL]
+        evaluations_by_idx = {}
 
-            if idx < MAX_DETAILED_EVAL:
+        t_llm = time.perf_counter()
+        # Try batched eval first: one LLM call for all top-N (fewer round-trips).
+        if len(top_n) > 0:
+            batch_prompt = (
+                "You are a hiring expert. For each of the following CVs, evaluate against the Job Description. "
+                "Provide for each: 1) Eligibility percentage 2) Matching skills 3) Missing skills 4) Final recommendation. "
+                "Return ONLY a JSON array of exactly N evaluation strings (one per CV), in the same order as the CVs below. "
+                "Each array element must be a single string containing that candidate's evaluation.\n\n"
+                f"Job Description:\n{jd_text[:3000]}\n\n"
+            )
+            for i, item in enumerate(top_n):
+                batch_prompt += f"\n--- CV {i + 1} ({item['name']}) ---\n{item['cv_text'][:2500]}\n"
+            batch_prompt += "\nReturn format: [\"eval1\", \"eval2\", ...]"
+
+            try:
+                batch_response = self._ask_llm(batch_prompt)
+                raw = batch_response.strip()
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                raw = raw.strip()
+                if raw.startswith("["):
+                    batch_evals = json.loads(raw)
+                    for idx, ev in enumerate(batch_evals[:len(top_n)]):
+                        evaluations_by_idx[idx] = ev if isinstance(ev, str) else str(ev)
+            except (json.JSONDecodeError, Exception):
+                pass
+
+        MAX_CV_SNIPPET_LLM = 12000
+        MAX_JD_SNIPPET_LLM = 8000
+
+        # If batched eval didn't cover everyone, run missing ones in parallel.
+        if len(evaluations_by_idx) < len(top_n):
+            def _eval_one(idx_item):
+                idx, item = idx_item
+                cv_text = (item["cv_text"] or "")[:MAX_CV_SNIPPET_LLM]
+                jd_snip = (jd_text or "")[:MAX_JD_SNIPPET_LLM]
                 prompt = f"""
                 You are a hiring expert.
                 
@@ -250,17 +348,34 @@ class HRService:
                 {cv_text}
                 
                 Job Description:
-                {jd_text}
+                {jd_snip}
                 """
-                evaluation = self._ask_llm(prompt)
-            else:
-                # Lightweight template-based summary for non-top candidates.
-                evaluation = (
-                    "Automatically generated summary: this candidate was evaluated using "
-                    "semantic similarity and skill scores and ranked below the top group. "
-                    "Review the detailed skill scores and status for more insight."
-                )
+                return idx, self._ask_llm(prompt)
 
+            remaining = [(i, item) for i, item in enumerate(top_n) if i not in evaluations_by_idx]
+            if remaining:
+                with ThreadPoolExecutor(max_workers=min(MAX_LLM_WORKERS, len(remaining))) as executor:
+                    futures = {executor.submit(_eval_one, (i, item)): i for i, item in remaining}
+                    for future in as_completed(futures):
+                        idx, evaluation = future.result()
+                        evaluations_by_idx[idx] = evaluation
+
+        if len(top_n) > 0:
+            logger.info(
+                "CV eval: LLM narrative step took %.2fs (top_n=%d)",
+                time.perf_counter() - t_llm,
+                len(top_n),
+            )
+
+        template_evaluation = (
+            "Automatically generated summary: this candidate was evaluated using "
+            "semantic similarity and skill scores and ranked below the top group. "
+            "Review the detailed skill scores and status for more insight."
+        )
+
+        results = []
+        for idx, item in enumerate(intermediate_results):
+            evaluation = evaluations_by_idx.get(idx, template_evaluation)
             results.append({
                 "name": item["name"],
                 "score": item["score"],

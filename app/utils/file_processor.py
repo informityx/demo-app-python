@@ -2,6 +2,7 @@ import PyPDF2
 import docx
 import tempfile
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple
 from werkzeug.datastructures import FileStorage
 
@@ -75,7 +76,7 @@ def process_file(file: FileStorage) -> Tuple[str, str]:
 
 def process_multiple_files(files: List[FileStorage]) -> List[Tuple[str, str]]:
     """
-    Process multiple uploaded files.
+    Process multiple uploaded files (sequential).
     Returns list of tuples (filename, extracted_text)
     """
     results = []
@@ -87,3 +88,31 @@ def process_multiple_files(files: List[FileStorage]) -> List[Tuple[str, str]]:
             # Continue processing other files even if one fails
             results.append((file.filename or "unknown", f"Error processing file: {str(e)}"))
     return results
+
+
+def process_multiple_files_parallel(
+    files: List[FileStorage], max_workers: int = 8
+) -> List[Tuple[str, str]]:
+    """
+    Process multiple uploaded files in parallel.
+    Returns list of tuples (filename, extracted_text) in the same order as input.
+    """
+    def process_one(idx_and_file: Tuple[int, FileStorage]) -> Tuple[int, Tuple[str, str]]:
+        idx, file = idx_and_file
+        try:
+            filename, text = process_file(file)
+            return (idx, (filename, text))
+        except Exception as e:
+            return (idx, (file.filename or "unknown", f"Error processing file: {str(e)}"))
+
+    result_by_idx = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(files))) as executor:
+        futures = {
+            executor.submit(process_one, (i, f)): i
+            for i, f in enumerate(files)
+        }
+        for future in as_completed(futures):
+            idx, pair = future.result()
+            result_by_idx[idx] = pair
+
+    return [result_by_idx[i] for i in range(len(files))]

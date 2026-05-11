@@ -39,6 +39,20 @@ def init_db():
                     except Exception as e:
                         print(f"Error migrating users: {e}")
                         db.session.rollback()
+                else:
+                    # No users.xlsx: create default admin for local dev/testing
+                    try:
+                        admin = User(
+                            username='admin',
+                            password=generate_password_hash('password123'),
+                            role='Employee'
+                        )
+                        db.session.add(admin)
+                        db.session.commit()
+                        print("Created default user: admin / password123")
+                    except Exception as e:
+                        print(f"Error creating default user: {e}")
+                        db.session.rollback()
         except Exception as e:
             print(f"Warning: User migration failed: {e}")
         
